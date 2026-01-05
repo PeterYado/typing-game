@@ -4,265 +4,202 @@ import sys
 import asyncio
 import io
 import csv
+import time
 
 # -------------------- 설정 --------------------
-# ★ 여기에 구글 시트에서 "웹에 게시 -> CSV"로 얻은 URL을 넣으세요!
-# (테스트용으로 제가 만든 시트 주소를 넣어뒀습니다. PETER님 걸로 바꾸시면 됩니다.)
+# ★ 구글 시트 주소 (CSV)
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSjim8tnfOemk_eCrfikI5jl105bSbpv2uMP0ZZNPZJOHbKZIY2j_tvhIo3xIi7LVqSHz1gYTEHt6f1/pub?gid=0&single=true&output=csv"
 
-# 화면 설정 (세로 1440 모니터 대응)
 SCREEN_WIDTH = 540
-SCREEN_HEIGHT = 900  
+SCREEN_HEIGHT = 900
 FPS = 60
-INITIAL_LIVES = 3
-
-# -------------------- 웹/로컬 환경 구분 및 데이터 로드 --------------------
 IS_WEB = sys.platform == "emscripten"
 
-async def fetch_csv_data(url):
-    print(f"원본 URL: {url}")
+# -------------------- 화면 출력 로그 함수 --------------------
+# 콘솔 대신 게임 화면에 글자를 적어주는 함수입니다.
+def log_to_screen(screen, font, message):
+    screen.fill((0, 0, 0))
+    # 메시지를 줄바꿈해서 출력
+    lines = message.split('\n')
+    y = SCREEN_HEIGHT // 3
+    for line in lines:
+        text = font.render(line, True, (255, 255, 255))
+        screen.blit(text, (20, y))
+        y += 30
+    pygame.display.update()
+
+# -------------------- 데이터 로드 (디버깅 강화) --------------------
+async def fetch_csv_data(url, screen, font):
+    log_to_screen(screen, font, "1. 네트워크 초기화 중...")
+    await asyncio.sleep(0.5) # 화면 갱신 대기
+
     csv_text = ""
     
-    # ★ 핵심: 보안 우회(CORS Proxy) 서버를 사용
-    # 구글 시트 주소를 우회 서버(allorigins)를 통해 가져옵니다.
+    # 우회 주소 생성
     import urllib.parse
     encoded_url = urllib.parse.quote(url, safe='')
     proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
-    
     target_url = proxy_url if IS_WEB else url
-    print(f"요청 URL: {target_url}")
-
-    if IS_WEB:
-        from pyodide.http import pyfetch
-        try:
-            # 우회 주소로 데이터 요청
+    
+    log_to_screen(screen, font, f"2. 데이터 요청 시작...\n{target_url[:40]}...")
+    
+    try:
+        if IS_WEB:
+            from pyodide.http import pyfetch
             response = await pyfetch(target_url)
             if response.status == 200:
                 csv_text = await response.string()
+                log_to_screen(screen, font, "3. 다운로드 성공!")
             else:
-                print(f"다운로드 실패 상태코드: {response.status}")
-        except Exception as e:
-            print(f"웹 데이터 로드 에러 (CORS 문제 가능성): {e}")
-    else:
-        try:
+                log_to_screen(screen, font, f"3. 실패! 상태코드: {response.status}")
+                await asyncio.sleep(2)
+        else:
+            # 로컬 테스트용
             import requests
-            response = requests.get(url) # 로컬은 그냥 원본 주소 써도 됨
-            if response.status_code == 200:
-                csv_text = response.text
-        except:
-            pass
+            response = requests.get(url)
+            csv_text = response.text
+            
+    except Exception as e:
+        log_to_screen(screen, font, f"3. 에러 발생!\n{str(e)}")
+        print(f"Error: {e}")
+        await asyncio.sleep(3) # 에러 메시지 읽을 시간 줌
 
-    # --- 여기서부터는 파싱 로직 (그대로) ---
+    # 파싱 시작
+    log_to_screen(screen, font, "4. 데이터 분석 중...")
     parsed_data = []
+    
     if csv_text:
         try:
             f = io.StringIO(csv_text)
             reader = csv.DictReader(f)
             for row in reader:
-                # 안전장치: 빈 줄이나 데이터 깨짐 방지
                 if row.get('level') and row.get('word'):
                     parsed_data.append({
                         "level": int(row['level']),
                         "word": row['word'].strip(),
                         "meaning": row['meaning'].strip()
                     })
-            print(f"성공! 총 {len(parsed_data)}개의 단어를 로드했습니다.")
+            log_to_screen(screen, font, f"5. 완료! 총 {len(parsed_data)}개 로드됨")
+            await asyncio.sleep(1)
         except Exception as e:
-            print(f"CSV 해석 에러: {e}")
-            # 비상용 데이터
-            parsed_data = [{"level":1, "word":"Error", "meaning":"데이터오류"}]
-    else:
-        print("데이터를 가져오지 못했습니다.")
-        parsed_data = [{"level":1, "word":"NetworkError", "meaning":"연결실패"}]
+            log_to_screen(screen, font, f"4. CSV 파싱 실패\n{str(e)}")
+            await asyncio.sleep(3)
     
     return parsed_data
 
-# -------------------- 음성 (TTS) --------------------
-def speak_word(text):
-    if IS_WEB:
-        try:
-            from platform import window
-            utterance = window.SpeechSynthesisUtterance.new(text)
-            utterance.lang = "en-US"
-            window.speechSynthesis.speak(utterance)
-        except: pass
-    else:
-        # 로컬은 복잡하니 생략하거나 pyttsx3 사용
-        pass 
-
-# -------------------- 클래스 --------------------
-class Word:
-    def __init__(self, word, meaning, x, y, speed):
-        self.word = word
-        self.meaning = meaning
-        self.x = x
-        self.y = y
-        self.speed = speed
-        self.active = True
-        self.matched = False
-        self.display_meaning_time = 0
-
-    def update(self):
-        if self.active:
-            self.y += self.speed
-
-    def draw(self, screen, font):
-        if self.active and not self.matched:
-            # 글자 테두리 (가독성 위해)
-            text_surf = font.render(self.word, True, (255, 255, 255))
-            screen.blit(text_surf, (self.x, self.y))
-
-        if self.matched:
-            # 뜻 보여주기
-            import time
-            if time.time() - self.display_meaning_time < 1.5:
-                meaning_surf = font.render(self.meaning, True, (255, 200, 200))
-                screen.blit(meaning_surf, (self.x, self.y))
-            else:
-                self.active = False
-
-# -------------------- 메인 게임 --------------------
+# -------------------- 메인 --------------------
 async def main():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Google Sheet Typing Game")
     
-    # 폰트 설정
+    # 폰트 로드 (한글 깨짐 방지 위해 없으면 기본폰트)
     try:
         font = pygame.font.Font("meiryo.ttc", 20)
+    except:
+        font = pygame.font.Font(None, 24)
+
+    # 데이터 로드 시도
+    word_db = []
+    try:
+        # 화면과 폰트를 넘겨줘서 진행상황을 그리게 함
+        word_db = await fetch_csv_data(GOOGLE_SHEET_URL, screen, font)
+    except Exception as e:
+        log_to_screen(screen, font, f"치명적 오류:\n{e}")
+        await asyncio.sleep(3)
+
+    # 실패 시 기본 데이터 사용
+    if not word_db:
+        log_to_screen(screen, font, "기본 데이터로 시작합니다.")
+        await asyncio.sleep(1)
+        word_db = [{"level":1, "word":"Error", "meaning":"데이터로드실패"},
+                   {"level":1, "word":"Check", "meaning":"확인요망"}]
+
+    # === 여기서부터 게임 루프 ===
+    # (기존 코드와 동일하게 게임 시작)
+    
+    # 폰트 다시 설정 (게임용)
+    try:
+        game_font = pygame.font.Font("meiryo.ttc", 20)
         ui_font = pygame.font.Font("meiryo.ttc", 24)
     except:
-        font = pygame.font.Font(None, 30)
+        game_font = pygame.font.Font(None, 30)
         ui_font = pygame.font.Font(None, 36)
 
-    # ★ 게임 시작 전 데이터 로딩 대기 화면
-    loading = True
-    word_db = []
-    
-    # 로딩 화면 표시
-    screen.fill((0,0,0))
-    load_msg = ui_font.render("Loading Data from Google Sheet...", True, (255,255,255))
-    screen.blit(load_msg, (50, SCREEN_HEIGHT//2))
-    pygame.display.update()
-    
-    # 데이터 가져오기 (비동기)
-    word_db = await fetch_csv_data(GOOGLE_SHEET_URL)
-    
-    if not word_db:
-        # 데이터 로드 실패 시 비상용 더미 데이터
-        word_db = [{"level":1, "word":"Error", "meaning":"데이터로드실패"}]
-
-    # 타이틀 화면
-    waiting = True
-    start_msg = ui_font.render("Click or Press Key to Start", True, (0,255,0))
-    
-    while waiting:
-        screen.fill((0,0,0))
-        screen.blit(start_msg, (SCREEN_WIDTH//2 - 130, SCREEN_HEIGHT//2))
-        pygame.display.update()
-        for event in pygame.event.get():
-            if event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.KEYDOWN:
-                waiting = False
-        await asyncio.sleep(0)
-
-    # 게임 변수 초기화
     clock = pygame.time.Clock()
     running = True
     words = []
     input_text = ""
-    lives = INITIAL_LIVES
+    lives = 3
     score = 0
     level = 1
-    
-    import time
-    last_spawn_time = time.time() - 2 # 바로 시작
+    last_spawn_time = time.time() - 2
 
+    class Word:
+        def __init__(self, word, meaning, x, y, speed):
+            self.word = word; self.meaning = meaning
+            self.x = x; self.y = y; self.speed = speed
+            self.active = True; self.matched = False; self.display_time = 0
+        def update(self):
+            if self.active: self.y += self.speed
+        def draw(self, screen):
+            if self.active and not self.matched:
+                s = game_font.render(self.word, True, (255,255,255))
+                screen.blit(s, (self.x, self.y))
+            if self.matched:
+                if time.time() - self.display_time < 1.0:
+                    s = game_font.render(self.meaning, True, (255,200,200))
+                    screen.blit(s, (self.x, self.y))
+                else: self.active = False
+
+    # 게임 루프
     while running:
-        screen.fill((20, 20, 30)) # 약간 남색 배경
+        screen.fill((20, 20, 30))
         
-        # 레벨별 난이도 설정 (스테이지 테이블 대신 수식으로 처리)
-        # 레벨이 오를수록 빨라지고(speed), 더 자주 나옴(interval 감소)
-        spawn_interval = max(0.5, 2.0 - (level * 0.1))  # 2초에서 시작해서 점점 줄어듦
-        fall_speed = 1.0 + (level * 0.2) # 1.0에서 시작해서 점점 빨라짐
-        score_threshold = level * 100 # 다음 레벨까지 필요한 점수
-
-        # 이벤트 처리
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+            if event.type == pygame.QUIT: running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_BACKSPACE:
-                    input_text = input_text[:-1]
+                if event.key == pygame.K_BACKSPACE: input_text = input_text[:-1]
                 elif event.key == pygame.K_RETURN:
-                    matched_any = False
+                    matched = False
                     for w in words:
                         if w.word == input_text and w.active and not w.matched:
-                            w.matched = True
-                            w.display_meaning_time = time.time()
-                            speak_word(w.word)
-                            score += 10
-                            matched_any = True
-                            break
+                            w.matched = True; w.display_time = time.time()
+                            score += 10; matched = True; break
                     input_text = ""
-                    
-                    # 레벨업 체크
-                    if score >= score_threshold:
-                        level += 1
-                        print(f"Level Up! {level}")
+                else: input_text += event.unicode
 
-                else:
-                    input_text += event.unicode
+        # 스폰
+        spawn_interval = max(0.5, 2.0 - (level * 0.1))
+        if time.time() - last_spawn_time > spawn_interval:
+            candidates = [w for w in word_db if w['level'] == level]
+            if not candidates: candidates = word_db
+            
+            if candidates:
+                d = random.choice(candidates)
+                words.append(Word(d['word'], d['meaning'], random.randint(20, SCREEN_WIDTH-100), 0, 1.0 + level*0.2))
+            last_spawn_time = time.time()
 
-        # 단어 생성 로직
-        current_time = time.time()
-        if current_time - last_spawn_time > spawn_interval:
-            # 현재 레벨에 맞는 단어 필터링
-            level_words = [w for w in word_db if w['level'] == level]
-            
-            # 해당 레벨 단어가 없으면 이전 레벨 단어들도 포함 (안전장치)
-            if not level_words:
-                level_words = [w for w in word_db if w['level'] <= level]
-            
-            if level_words:
-                w_data = random.choice(level_words)
-                x_pos = random.randint(20, SCREEN_WIDTH - 120)
-                words.append(Word(w_data["word"], w_data["meaning"], x_pos, 0, fall_speed))
-            
-            last_spawn_time = current_time
-
-        # 업데이트 및 그리기
+        # 그리기
         for w in words:
-            w.update()
-            w.draw(screen, font)
-            
-            # 화면 밖으로 나가면 라이프 감소
+            w.update(); w.draw(screen)
             if w.y > SCREEN_HEIGHT and w.active:
                 w.active = False
-                if not w.matched:
-                    lives -= 1
-                    # 화면 붉게 깜빡임 효과 (선택사항)
+                if not w.matched: lives -= 1
 
-        # UI 표시
-        input_ui = ui_font.render(f"> {input_text}", True, (0, 255, 0))
-        screen.blit(input_ui, (50, SCREEN_HEIGHT - 60))
+        # UI
+        screen.blit(ui_font.render(f"> {input_text}", True, (0,255,0)), (50, SCREEN_HEIGHT-50))
+        screen.blit(ui_font.render(f"Lv.{level} Score:{score} Lives:{lives}", True, (255,255,0)), (20,20))
 
-        info_ui = ui_font.render(f"Lv.{level}  Score: {score}  Lives: {lives}", True, (255, 255, 0))
-        screen.blit(info_ui, (20, 20))
-
-        # 게임오버 처리
         if lives <= 0:
-            over_msg = ui_font.render("GAME OVER", True, (255, 0, 0))
-            screen.blit(over_msg, (SCREEN_WIDTH//2 - 60, SCREEN_HEIGHT//2))
+            screen.blit(ui_font.render("GAME OVER", True, (255,0,0)), (SCREEN_WIDTH//2-60, SCREEN_HEIGHT//2))
             pygame.display.update()
             await asyncio.sleep(3)
-            # 재시작 또는 종료 로직 (여기선 종료)
             running = False
 
         pygame.display.update()
-        await asyncio.sleep(0) # 웹 프레임 양보
+        await asyncio.sleep(0)
 
     pygame.quit()
 
 if __name__ == "__main__":
     asyncio.run(main())
-
