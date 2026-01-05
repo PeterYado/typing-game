@@ -20,50 +20,60 @@ INITIAL_LIVES = 3
 IS_WEB = sys.platform == "emscripten"
 
 async def fetch_csv_data(url):
-    """인터넷(구글시트)에서 CSV 데이터를 가져와 파싱하는 함수"""
-    print("데이터 다운로드 중...")
+    print(f"원본 URL: {url}")
     csv_text = ""
     
+    # ★ 핵심: 보안 우회(CORS Proxy) 서버를 사용
+    # 구글 시트 주소를 우회 서버(allorigins)를 통해 가져옵니다.
+    import urllib.parse
+    encoded_url = urllib.parse.quote(url, safe='')
+    proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
+    
+    target_url = proxy_url if IS_WEB else url
+    print(f"요청 URL: {target_url}")
+
     if IS_WEB:
-        # 웹 브라우저 환경 (pyodide)
         from pyodide.http import pyfetch
         try:
-            response = await pyfetch(url)
+            # 우회 주소로 데이터 요청
+            response = await pyfetch(target_url)
             if response.status == 200:
                 csv_text = await response.string()
             else:
-                print(f"다운로드 실패: {response.status}")
+                print(f"다운로드 실패 상태코드: {response.status}")
         except Exception as e:
-            print(f"웹 데이터 로드 에러: {e}")
+            print(f"웹 데이터 로드 에러 (CORS 문제 가능성): {e}")
     else:
-        # 로컬 PC 환경 (requests 라이브러리 필요)
         try:
             import requests
-            response = requests.get(url)
+            response = requests.get(url) # 로컬은 그냥 원본 주소 써도 됨
             if response.status_code == 200:
                 csv_text = response.text
-        except ImportError:
-            print("로컬 테스트 시 'pip install requests'가 필요합니다.")
-        except Exception as e:
-            print(f"로컬 데이터 로드 에러: {e}")
+        except:
+            pass
 
-    # CSV 파싱 (level, word, meaning)
+    # --- 여기서부터는 파싱 로직 (그대로) ---
     parsed_data = []
     if csv_text:
         try:
             f = io.StringIO(csv_text)
             reader = csv.DictReader(f)
             for row in reader:
-                # 구글 시트 헤더가 level, word, meaning 이라고 가정
-                if row['level'] and row['word']:
+                # 안전장치: 빈 줄이나 데이터 깨짐 방지
+                if row.get('level') and row.get('word'):
                     parsed_data.append({
                         "level": int(row['level']),
                         "word": row['word'].strip(),
                         "meaning": row['meaning'].strip()
                     })
-            print(f"총 {len(parsed_data)}개의 단어를 로드했습니다.")
+            print(f"성공! 총 {len(parsed_data)}개의 단어를 로드했습니다.")
         except Exception as e:
-            print(f"CSV 파싱 에러: {e}")
+            print(f"CSV 해석 에러: {e}")
+            # 비상용 데이터
+            parsed_data = [{"level":1, "word":"Error", "meaning":"데이터오류"}]
+    else:
+        print("데이터를 가져오지 못했습니다.")
+        parsed_data = [{"level":1, "word":"NetworkError", "meaning":"연결실패"}]
     
     return parsed_data
 
@@ -255,3 +265,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
