@@ -8,7 +8,7 @@ import time
 
 # -------------------- 설정 --------------------
 # ★ 구글 시트 주소 (CSV)
-GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSjim8tnfOemk_eCrfikI5jl105bSbpv2uMP0ZZNPZJOHbKZIY2j_tvhIo3xIi7LVqSHz1gYTEHt6f1/pub?gid=0&single=true&output=csv"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQf9xYvJ_sW-PyoC7LqHBNM5-xysu3Hru4cO_SdxL_tQOuwuWn-N_v3J6J2oGz7s6fH8mX-gKk4g9qB/pub?gid=0&single=true&output=csv"
 
 SCREEN_WIDTH = 540
 SCREEN_HEIGHT = 900
@@ -30,18 +30,16 @@ def log_to_screen(screen, font, message):
 
 # -------------------- 데이터 로드 (디버깅 강화) --------------------
 async def fetch_csv_data(url, screen, font):
-    log_to_screen(screen, font, "1. 네트워크 초기화 중...")
-    await asyncio.sleep(0.5) # 화면 갱신 대기
+    log_to_screen(screen, font, "1. 데이터 요청 중...")
+    await asyncio.sleep(0.5)
 
     csv_text = ""
     
-    # 우회 주소 생성
+    # 우회 접속 (CORS Proxy)
     import urllib.parse
     encoded_url = urllib.parse.quote(url, safe='')
     proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
     target_url = proxy_url if IS_WEB else url
-    
-    log_to_screen(screen, font, f"2. 데이터 요청 시작...\n{target_url[:40]}...")
     
     try:
         if IS_WEB:
@@ -49,40 +47,63 @@ async def fetch_csv_data(url, screen, font):
             response = await pyfetch(target_url)
             if response.status == 200:
                 csv_text = await response.string()
-                log_to_screen(screen, font, "3. 다운로드 성공!")
             else:
-                log_to_screen(screen, font, f"3. 실패! 상태코드: {response.status}")
+                log_to_screen(screen, font, f"다운로드 실패: {response.status}")
                 await asyncio.sleep(2)
+                return []
         else:
-            # 로컬 테스트용
             import requests
             response = requests.get(url)
+            response.encoding = 'utf-8-sig' # 로컬 테스트용 인코딩 처리
             csv_text = response.text
-            
+
     except Exception as e:
-        log_to_screen(screen, font, f"3. 에러 발생!\n{str(e)}")
-        print(f"Error: {e}")
-        await asyncio.sleep(3) # 에러 메시지 읽을 시간 줌
+        log_to_screen(screen, font, f"통신 에러: {e}")
+        await asyncio.sleep(2)
+        return []
+
+    # ★ 핵심 수정: 투명 글자(BOM) 제거 ★
+    csv_text = csv_text.replace('\ufeff', '').strip()
 
     # 파싱 시작
-    log_to_screen(screen, font, "4. 데이터 분석 중...")
+    log_to_screen(screen, font, "2. 데이터 분석 중...")
     parsed_data = []
     
     if csv_text:
         try:
             f = io.StringIO(csv_text)
-            reader = csv.DictReader(f)
+            # 헤더 공백 제거 기능 추가 ( skipinitialspace=True )
+            reader = csv.DictReader(f, skipinitialspace=True)
+            
+            # 디버깅: 헤더가 뭔지 화면에 찍어보기
+            if reader.fieldnames:
+                print(f"인식된 헤더: {reader.fieldnames}")
+
             for row in reader:
-                if row.get('level') and row.get('word'):
+                # 헤더 이름에 공백이 있어도 처리하도록 수정 (strip)
+                # 안전하게 가져오기 위해 row.get 사용
+                r_level = row.get('level') or row.get('Level')
+                r_word = row.get('word') or row.get('Word')
+                r_meaning = row.get('meaning') or row.get('Meaning')
+
+                if r_level and r_word and r_meaning:
                     parsed_data.append({
-                        "level": int(row['level']),
-                        "word": row['word'].strip(),
-                        "meaning": row['meaning'].strip()
+                        "level": int(r_level),
+                        "word": r_word.strip(),
+                        "meaning": r_meaning.strip()
                     })
-            log_to_screen(screen, font, f"5. 완료! 총 {len(parsed_data)}개 로드됨")
-            await asyncio.sleep(1)
+            
+            if not parsed_data:
+                # 데이터가 0개면 헤더 문제일 가능성이 높음
+                error_msg = f"데이터 0개 감지.\n헤더확인필요: {reader.fieldnames}"
+                log_to_screen(screen, font, error_msg)
+                await asyncio.sleep(5) # 에러 읽을 시간 줌
+            else:
+                log_to_screen(screen, font, f"3. 완료! {len(parsed_data)}개 로드")
+                await asyncio.sleep(1)
+
         except Exception as e:
-            log_to_screen(screen, font, f"4. CSV 파싱 실패\n{str(e)}")
+            log_to_screen(screen, font, f"파싱 에러: {str(e)}")
             await asyncio.sleep(3)
     
     return parsed_data
